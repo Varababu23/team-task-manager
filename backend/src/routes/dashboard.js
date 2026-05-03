@@ -1,19 +1,18 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
-const { getDB } = require('../db');
+const { getPrismaClient } = require('../prisma');
 
-// GET /api/dashboard
-router.get('/', auth, (req, res) => {
+const prisma = getPrismaClient();
+
+router.get('/', auth, async (req, res) => {
   try {
-    const db = getDB();
-    const userId = req.user.id;
+    const memberships = await prisma.projectMember.findMany({
+      where: { user_id: req.user.id },
+      select: { project_id: true }
+    });
 
-    // Get all project IDs the user belongs to
-    const projectRows = db.prepare(
-      'SELECT project_id FROM project_members WHERE user_id = ?'
-    ).all(userId);
-    const projectIds = projectRows.map(r => r.project_id);
+    const projectIds = memberships.map(m => m.project_id);
 
     if (projectIds.length === 0) {
       return res.json({
@@ -26,61 +25,70 @@ router.get('/', auth, (req, res) => {
       });
     }
 
-    // Build IN clause safely
-    const placeholders = projectIds.map(() => '?').join(',');
+    const tasks = await prisma.task.findMany({
+      where: {
+        project_id: { in: projectIds }
+      },
+      include: {
+        assignee: true,
+        project: true
+      },
+      orderBy: {
+        created_at: 'desc'
+      }
+    });
 
-    // Total tasks
-    const totalResult = db.prepare(
-      `SELECT COUNT(*) as count FROM tasks WHERE project_id IN (${placeholders})`
-    ).get(...projectIds);
-
-    // Tasks by status
-    const statusRows = db.prepare(
-      `SELECT status, COUNT(*) as count FROM tasks WHERE project_id IN (${placeholders}) GROUP BY status`
-    ).all(...projectIds);
+    const totalTasks = tasks.length;
     const tasksByStatus = { todo: 0, in_progress: 0, done: 0 };
-    statusRows.forEach(r => { tasksByStatus[r.status] = r.count; });
+    let overdueTasks = 0;
+    let myTasks = 0;
 
-    // Overdue tasks
-    const overdueResult = db.prepare(
-      `SELECT COUNT(*) as count FROM tasks WHERE project_id IN (${placeholders}) AND due_date < date('now') AND status != 'done'`
-    ).get(...projectIds);
+    tasks.forEach(task => {
+      tasksByStatus[task.status] = (tasksByStatus[task.status] || 0) + 1;
 
-    // My tasks
-    const myTasksResult = db.prepare(
-      `SELECT COUNT(*) as count FROM tasks WHERE project_id IN (${placeholders}) AND assigned_to = ?`
-    ).get(...projectIds, userId);
+      if (task.due_date && new Date(task.due_date) < new Date() && task.status !== 'done') {
+        overdueTasks++;
+      }
 
-    // Tasks per user (top 5)
-    const tasksPerUser = db.prepare(`
-      SELECT u.name, u.id, COUNT(t.id) as task_count
-      FROM tasks t
-      JOIN users u ON t.assigned_to = u.id
-      WHERE t.project_id IN (${placeholders})
-      GROUP BY u.id, u.name
-      ORDER BY task_count DESC
-      LIMIT 5
-    `).all(...projectIds);
+      if (task.assigned_to === req.user.id) {
+        myTasks++;
+      }
+    });
 
-    // Recent tasks
-    const recentTasks = db.prepare(`
-      SELECT t.*, u.name as assigned_to_name, p.name as project_name
-      FROM tasks t
-      LEFT JOIN users u ON t.assigned_to = u.id
-      JOIN projects p ON t.project_id = p.id
-      WHERE t.project_id IN (${placeholders})
-      ORDER BY t.created_at DESC
-      LIMIT 5
-    `).all(...projectIds);
+    const userTaskMap = {};
+
+    tasks.forEach(task => {
+      if (task.assignee) {
+        if (!userTaskMap[task.assignee.id]) {
+          userTaskMap[task.assignee.id] = {
+            id: task.assignee.id,
+            name: task.assignee.name,
+            task_count: 0
+          };
+        }
+        userTaskMap[task.assignee.id].task_count++;
+      }
+    });
+
+    const tasksPerUser = Object.values(userTaskMap)
+      .sort((a, b) => b.task_count - a.task_count)
+      .slice(0, 5);
+
+    const recentTasks = tasks.slice(0, 5).map(task => ({
+      ...task,
+      assigned_to_name: task.assignee?.name || null,
+      project_name: task.project?.name || null
+    }));
 
     res.json({
-      totalTasks: totalResult.count,
+      totalTasks,
       tasksByStatus,
-      overdueTasks: overdueResult.count,
-      myTasks: myTasksResult.count,
+      overdueTasks,
+      myTasks,
       tasksPerUser,
       recentTasks
     });
+
   } catch (err) {
     console.error('Dashboard error:', err);
     res.status(500).json({ error: 'Internal server error' });
