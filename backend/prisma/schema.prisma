@@ -1,0 +1,68 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            Int     @id @default(autoincrement())
+  name          String
+  email         String  @unique
+  password_hash String
+  created_at    DateTime @default(now())
+
+  projects      ProjectMember[]
+  created_projects Project[] @relation("created_by")
+  created_tasks Task[] @relation("created_by")
+  assigned_tasks Task[] @relation("assigned_to")
+}
+
+model Project {
+  id          Int     @id @default(autoincrement())
+  name        String
+  description String?
+  created_by  Int?
+  created_at  DateTime @default(now())
+
+  creator     User? @relation("created_by", fields: [created_by], references: [id], onDelete: SetNull)
+  members     ProjectMember[]
+  tasks       Task[]
+}
+
+model ProjectMember {
+  id        Int     @id @default(autoincrement())
+  project_id Int
+  user_id   Int
+  role      String  @default("member")
+  joined_at DateTime @default(now())
+
+  project   Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  user      User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, user_id])
+}
+
+model Task {
+  id          Int     @id @default(autoincrement())
+  project_id  Int
+  title       String
+  description String?
+  due_date    String?
+  priority    String  @default("medium")
+  status      String  @default("todo")
+  assigned_to Int?
+  created_by  Int?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @default(now())
+
+  project     Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  assignee    User? @relation("assigned_to", fields: [assigned_to], references: [id], onDelete: SetNull)
+  creator     User? @relation("created_by", fields: [created_by], references: [id], onDelete: SetNull)
+}
+
