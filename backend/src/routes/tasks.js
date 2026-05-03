@@ -1,88 +1,117 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
-const { getDB } = require('../db');
+const { getPrismaClient } = require('../prisma');
+
+const prisma = getPrismaClient();
 
 // GET /api/tasks/:id
-router.get('/:id', auth, (req, res) => {
+router.get('/:id', auth, async (req, res) => {
   try {
-    const db = getDB();
-    const task = db.prepare(`
-      SELECT t.*, u.name as assigned_to_name, u2.name as created_by_name
-      FROM tasks t
-      LEFT JOIN users u ON t.assigned_to = u.id
-      LEFT JOIN users u2 ON t.created_by = u2.id
-      WHERE t.id = ?
-    `).get(req.params.id);
+    const taskId = parseInt(req.params.id);
 
-    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      include: {
+        assignee: true,
+        creator: true
+      }
+    });
 
-    const member = db.prepare(
-      'SELECT role FROM project_members WHERE project_id = ? AND user_id = ?'
-    ).get(task.project_id, req.user.id);
-    if (!member) return res.status(403).json({ error: 'Access denied' });
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
 
-    res.json(task);
+    const member = await prisma.projectMember.findFirst({
+      where: {
+        project_id: task.project_id,
+        user_id: req.user.id
+      }
+    });
+
+    if (!member) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    res.json({
+      ...task,
+      assigned_to_name: task.assignee?.name || null,
+      created_by_name: task.creator?.name || null
+    });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // PUT /api/tasks/:id
-router.put('/:id', auth, (req, res) => {
+router.put('/:id', auth, async (req, res) => {
   const { title, description, due_date, priority, status, assigned_to } = req.body;
 
   try {
-    const db = getDB();
-    const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const taskId = parseInt(req.params.id);
 
-    const memberRow = db.prepare(
-      'SELECT role FROM project_members WHERE project_id = ? AND user_id = ?'
-    ).get(task.project_id, req.user.id);
-    if (!memberRow) return res.status(403).json({ error: 'Not a project member' });
+    const task = await prisma.task.findUnique({
+      where: { id: taskId }
+    });
 
-    // Members can only update status of tasks assigned to them
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const memberRow = await prisma.projectMember.findFirst({
+      where: {
+        project_id: task.project_id,
+        user_id: req.user.id
+      }
+    });
+
+    if (!memberRow) {
+      return res.status(403).json({ error: 'Not a project member' });
+    }
+
+    let updated;
+
     if (memberRow.role === 'member') {
       if (task.assigned_to !== req.user.id) {
         return res.status(403).json({ error: 'You can only update tasks assigned to you' });
       }
-      if (status === undefined) {
-        return res.status(403).json({ error: 'Members can only update task status' });
-      }
-      db.prepare('UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, req.params.id);
+
+      updated = await prisma.task.update({
+        where: { id: taskId },
+        data: {
+          status,
+          updated_at: new Date()
+        },
+        include: {
+          assignee: true,
+          creator: true
+        }
+      });
     } else {
-      // Admin can update everything
-      db.prepare(`
-        UPDATE tasks SET
-          title = COALESCE(?, title),
-          description = COALESCE(?, description),
-          due_date = COALESCE(?, due_date),
-          priority = COALESCE(?, priority),
-          status = COALESCE(?, status),
-          assigned_to = ?,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(
-        title || null,
-        description || null,
-        due_date || null,
-        priority || null,
-        status || null,
-        assigned_to !== undefined ? (assigned_to || null) : task.assigned_to,
-        req.params.id
-      );
+      updated = await prisma.task.update({
+        where: { id: taskId },
+        data: {
+          title: title || undefined,
+          description: description !== undefined ? description : undefined,
+          due_date: due_date !== undefined ? due_date : undefined,
+          priority: priority || undefined,
+          status: status || undefined,
+          assigned_to: assigned_to !== undefined ? assigned_to : undefined,
+          updated_at: new Date()
+        },
+        include: {
+          assignee: true,
+          creator: true
+        }
+      });
     }
 
-    const updated = db.prepare(`
-      SELECT t.*, u.name as assigned_to_name, u2.name as created_by_name
-      FROM tasks t
-      LEFT JOIN users u ON t.assigned_to = u.id
-      LEFT JOIN users u2 ON t.created_by = u2.id
-      WHERE t.id = ?
-    `).get(req.params.id);
-
-    res.json(updated);
+    res.json({
+      ...updated,
+      assigned_to_name: updated.assignee?.name || null,
+      created_by_name: updated.creator?.name || null
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -90,20 +119,37 @@ router.put('/:id', auth, (req, res) => {
 });
 
 // DELETE /api/tasks/:id
-router.delete('/:id', auth, (req, res) => {
+router.delete('/:id', auth, async (req, res) => {
   try {
-    const db = getDB();
-    const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const taskId = parseInt(req.params.id);
 
-    const member = db.prepare(
-      'SELECT role FROM project_members WHERE project_id = ? AND user_id = ?'
-    ).get(task.project_id, req.user.id);
-    if (!member || member.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+    const task = await prisma.task.findUnique({
+      where: { id: taskId }
+    });
 
-    db.prepare('DELETE FROM tasks WHERE id = ?').run(req.params.id);
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const member = await prisma.projectMember.findFirst({
+      where: {
+        project_id: task.project_id,
+        user_id: req.user.id,
+        role: 'admin'
+      }
+    });
+
+    if (!member) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    await prisma.task.delete({
+      where: { id: taskId }
+    });
+
     res.json({ message: 'Task deleted' });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
