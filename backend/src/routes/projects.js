@@ -5,6 +5,7 @@ const { getPrismaClient } = require('../prisma');
 
 const prisma = getPrismaClient();
 
+
 // GET /api/projects
 router.get('/', auth, async (req, res) => {
   try {
@@ -37,6 +38,7 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
+
 // POST /api/projects
 router.post('/', auth, async (req, res) => {
   const { name, description } = req.body;
@@ -66,6 +68,7 @@ router.post('/', auth, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 
 // GET /api/projects/:id
 router.get('/:id', auth, async (req, res) => {
@@ -116,6 +119,97 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
+
+// GET /api/projects/:id/tasks
+router.get('/:id/tasks', auth, async (req, res) => {
+  try {
+    const projectId = parseInt(req.params.id);
+
+    const member = await prisma.projectMember.findFirst({
+      where: {
+        project_id: projectId,
+        user_id: req.user.id
+      }
+    });
+
+    if (!member) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const tasks = await prisma.task.findMany({
+      where: { project_id: projectId },
+      include: {
+        assignee: true,
+        creator: true
+      },
+      orderBy: { created_at: 'desc' }
+    });
+
+    const formatted = tasks.map(task => ({
+      ...task,
+      assigned_to_name: task.assignee?.name || null,
+      created_by_name: task.creator?.name || null
+    }));
+
+    res.json(formatted);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+// POST /api/projects/:id/tasks
+router.post('/:id/tasks', auth, async (req, res) => {
+  try {
+    const projectId = parseInt(req.params.id);
+    const { title, description, due_date, priority, status, assigned_to } = req.body;
+
+    if (!title) {
+      return res.status(400).json({ error: 'Task title is required' });
+    }
+
+    const member = await prisma.projectMember.findFirst({
+      where: {
+        project_id: projectId,
+        user_id: req.user.id,
+        role: 'admin'
+      }
+    });
+
+    if (!member) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const task = await prisma.task.create({
+      data: {
+        title: title.trim(),
+        description: description || null,
+        due_date: due_date || null,
+        priority: priority || 'medium',
+        status: status || 'todo',
+        assigned_to: assigned_to || null,
+        project_id: projectId,
+        created_by: req.user.id
+      },
+      include: {
+        assignee: true,
+        creator: true
+      }
+    });
+
+    res.status(201).json({
+      ...task,
+      assigned_to_name: task.assignee?.name || null,
+      created_by_name: task.creator?.name || null
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
 // PUT /api/projects/:id
 router.put('/:id', auth, async (req, res) => {
   const { name, description } = req.body;
@@ -149,6 +243,7 @@ router.put('/:id', auth, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 
 // DELETE /api/projects/:id
 router.delete('/:id', auth, async (req, res) => {
