@@ -5,8 +5,12 @@ const path = require('path');
 
 const app = express();
 
+// Middleware
 app.use(cors({
-  origin: process.env.CLIENT_URL || '*',
+  origin: [
+    process.env.CLIENT_URL,
+    'http://localhost:5173'
+  ].filter(Boolean),
   credentials: true,
 }));
 
@@ -31,6 +35,7 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
+// Start server
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
